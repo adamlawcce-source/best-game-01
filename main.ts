@@ -1,6 +1,7 @@
 // Glimmerdeep's hand-in program (Node 22, standard library only). The game itself is the
 // plain static files in this directory's game/ folder — a desktop browser loads them offline
-// (game/index.html and its ES modules, no library, no network request) — and this program
+// (game/index.html and its ES modules, Three.js r186 vendored under game/vendor/three/,
+// no network request) — and this program
 // hands them in: it copies game/ and screenshots/ from beside this file into the output
 // directory and writes dossier.json there, the summary the judge reads, using the vendored
 // make.fun library. Run it outside the grader with MAKEFUN_OUTPUT_DIR standing in for
