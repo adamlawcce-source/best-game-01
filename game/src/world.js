@@ -1,8 +1,9 @@
-// The whole simulation: the lantern fish, the pearls and orbs it collects, the anglerfish
-// that hunt it, the jellyfish, the boss guarding the Heart of the Deep, and the light that
-// keeps it alive. One fixed step at a time, driven only by its seeded random source and
-// the steering it is handed, so a scene staged from one seed always plays out the same
-// way. Step returns the events of that step for sounds and the HUD.
+// Glimmerdeep 3D's simulation: Luma the lantern fish, the pearls and orbs it gathers,
+// the anglerfish that hunt it, the jellyfish, the boss guarding the Heart of the Deep,
+// and the lamp that keeps it alive. The world advances one fixed step at a time, driven
+// only by its seeded random source and the steering it is handed, so a scene staged from
+// one seed always plays out the same way. Each step returns the events of that step, and
+// the main loop turns them into sounds, banners and the end of the run.
 
 import {
   ANGLER,
@@ -35,7 +36,7 @@ export const EVENT_NONE = 0;
 export const EVENT_WIN = 1;
 export const EVENT_LOSE = 2;
 
-/** Which of the three zones the pearl count puts the run in (0, 1 or 2). */
+/** The zone the pearl count puts the run in: 0 Shallow Reef, 1 Deep Trench, 2 Abyss. */
 export function zoneOf(pearlsCollected) {
   let zone = 0;
   for (let i = 0; i < ZONES.length; i += 1) {
@@ -58,15 +59,15 @@ function makePlayer(random) {
 }
 
 function makePearl(random, kind = 'pearl') {
-  const golden = kind === 'golden';
-  const heartPearl = kind === 'heart-pearl';
+  const isGolden = kind === 'golden';
+  const isHeartPearl = kind === 'heart-pearl';
   return {
     x: FIELD.width + 30,
     y: range(random, 70, FIELD.height - 110),
-    radius: heartPearl ? HEART_PEARL.radius : golden ? GOLDEN.radius : PEARL.radius,
+    radius: isHeartPearl ? HEART_PEARL.radius : isGolden ? GOLDEN.radius : PEARL.radius,
     phase: random() * Math.PI * 2,
     bob: range(random, 8, 18),
-    speed: (heartPearl ? 0.45 : range(random, 0.7, 1.3)) * PEARL.drift,
+    speed: (isHeartPearl ? 0.45 : range(random, 0.7, 1.3)) * PEARL.drift,
     kind,
     active: true,
   };
@@ -145,7 +146,8 @@ function makeBoss(random) {
   };
 }
 
-function sparkle(world, x, y, colour, count) {
+/** A spray of fading sparkles at (x, y): the feedback for every pickup and hit. */
+function burst(world, x, y, colour, count) {
   for (let i = 0; i < count; i += 1) {
     const angle = world.random() * Math.PI * 2;
     const speed = range(world.random, 40, 150);
@@ -162,7 +164,8 @@ function sparkle(world, x, y, colour, count) {
   }
 }
 
-function floatText(world, x, y, text, colour) {
+/** A short floating label at (x, y): "+30", "Ouch!", a zone name. */
+function popup(world, x, y, text, colour) {
   world.state.floats.push({ x, y, text, colour, life: 1.1 });
 }
 
@@ -246,7 +249,7 @@ export class World {
     return Math.min(COMBO.max, 1 + Math.floor(this.state.chain / COMBO.perTier));
   }
 
-  /** Hurt the player once: a life, some light, the chain, a knockback and a shake. */
+  /** One hit on the player: a life, some light, the chain, a knockback and a shake. */
   hurt(s, fromX, fromY, events) {
     const p = s.player;
     s.lives -= 1;
@@ -261,8 +264,8 @@ export class World {
     p.vy = (dy / length) * 320 - 60;
     s.shake = 1;
     events.hit = true;
-    sparkle(this, p.x, p.y, '#ff6b81', 16);
-    floatText(this, p.x, p.y - 40, 'Ouch!', '#ff8fa3');
+    burst(this, p.x, p.y, '#ff6b81', 16);
+    popup(this, p.x, p.y - 40, 'Ouch!', '#ff8fa3');
     if (s.lives <= 0) {
       s.over = 'lose';
       events.over = EVENT_LOSE;
@@ -276,12 +279,12 @@ export class World {
     const s = this.state;
     const events = {
       pearlTier: 0, orb: false, hit: false, levelUp: false, zoneUp: false,
-      golden: false, heart: false, dash: false, over: EVENT_NONE,
+      golden: false, heart: false, dash: false, boss: false, over: EVENT_NONE,
     };
     if (s.over !== null) return events;
     s.time += dt;
 
-    // The light drains faster as the levels climb; an empty lamp ends the run.
+    // The lamp drains faster as the levels climb; an empty lamp ends the run.
     s.light -= (LIGHT_DRAIN + (s.level - 1) * LIGHT_DRAIN_PER_LEVEL) * dt;
     if (s.light <= 0) {
       s.light = 0;
@@ -299,7 +302,7 @@ export class World {
 
     // --- The player ---
     const p = s.player;
-    // A dash: a short burst in the direction already being steered (or facing).
+    // A dash is a short burst in the direction already being steered (or facing).
     if (steering.dash && s.dashCooldown <= 0 && s.dashTimer <= 0) {
       let dx = steering.x;
       let dy = steering.y;
@@ -318,7 +321,7 @@ export class World {
       s.dashTimer = DASH.time;
       s.dashCooldown = DASH.cooldown;
       events.dash = true;
-      sparkle(this, p.x, p.y, '#7fe7ff', 8);
+      burst(this, p.x, p.y, '#7fe7ff', 8);
     }
     let ax = 0;
     let ay = 0;
@@ -339,11 +342,11 @@ export class World {
     const drag = Math.max(0, 1 - PLAYER.drag * dt);
     p.vx *= drag;
     p.vy *= drag;
-    const maxSpeed = s.dashTimer > 0 ? DASH.speed : PLAYER.maxSpeed;
+    const topSpeed = s.dashTimer > 0 ? DASH.speed : PLAYER.maxSpeed;
     const speed = Math.hypot(p.vx, p.vy);
-    if (speed > maxSpeed) {
-      p.vx = (p.vx / speed) * maxSpeed;
-      p.vy = (p.vy / speed) * maxSpeed;
+    if (speed > topSpeed) {
+      p.vx = (p.vx / speed) * topSpeed;
+      p.vy = (p.vy / speed) * topSpeed;
     }
     p.x += p.vx * dt;
     p.y += p.vy * dt;
@@ -401,7 +404,8 @@ export class World {
     // The boss surfaces at 25 pearls and guards the Heart.
     if (s.boss === null && s.pearlsCollected >= BOSS.appearAt) {
       s.boss = makeBoss(this.random);
-      floatText(this, p.x, p.y - 44, 'Something huge stirs...', '#ff8fa3');
+      events.boss = true;
+      popup(this, p.x, p.y - 44, 'Something huge stirs...', '#ff8fa3');
     }
     s.bubbleTimer -= dt;
     if (s.bubbleTimer <= 0) {
@@ -416,13 +420,13 @@ export class World {
     }
 
     // --- Drift and swim ---
-    const drift = (item, dtStep) => {
+    const driftLeft = (item, dtStep) => {
       item.x -= item.speed * dtStep;
       item.phase += dtStep * 2;
     };
-    for (const pearl of s.pearls) drift(pearl, dt);
-    for (const orb of s.orbs) drift(orb, dt);
-    for (const heart of s.hearts) drift(heart, dt);
+    for (const pearl of s.pearls) driftLeft(pearl, dt);
+    for (const orb of s.orbs) driftLeft(orb, dt);
+    for (const heart of s.hearts) driftLeft(heart, dt);
     for (const angler of s.anglers) {
       angler.x += angler.direction * angler.speed * dt;
       angler.phase += dt * 2.4;
@@ -456,11 +460,11 @@ export class World {
     s.anglers = s.anglers.filter((angler) => angler.x > -90 && angler.x < FIELD.width + 90);
     s.jellies = s.jellies.filter((jelly) => jelly.x > -90 && jelly.x < FIELD.width + 90);
 
-    const distanceTo = (item) => Math.hypot(item.x - p.x, item.y - p.y);
+    const distTo = (item) => Math.hypot(item.x - p.x, item.y - p.y);
 
     // --- Pearls: quick chains raise the multiplier; the Heart ends the run ---
     for (const pearl of s.pearls) {
-      if (!pearl.active || distanceTo(pearl) > pearl.radius + p.radius) continue;
+      if (!pearl.active || distTo(pearl) > pearl.radius + p.radius) continue;
       pearl.active = false;
       s.pearlsCollected += 1;
       s.chain += 1;
@@ -472,8 +476,8 @@ export class World {
         gained = HEART_PEARL.points * tier;
         s.score += gained;
         events.pearlTier = tier;
-        sparkle(this, pearl.x, pearl.y, '#ff7fa5', 26);
-        floatText(this, pearl.x, pearl.y - 14, `Heart of the Deep! +${gained}`, '#ffd76a');
+        burst(this, pearl.x, pearl.y, '#ff7fa5', 26);
+        popup(this, pearl.x, pearl.y - 14, `Heart of the Deep! +${gained}`, '#ffd76a');
         s.over = 'win';
         events.over = EVENT_WIN;
         return events;
@@ -483,25 +487,25 @@ export class World {
         s.light = Math.min(LIGHT_START, s.light + GOLDEN.lightRefill);
         events.golden = true;
         colour = '#ffe9a8';
-        sparkle(this, pearl.x, pearl.y, '#ffc94d', 14);
+        burst(this, pearl.x, pearl.y, '#ffc94d', 14);
       } else {
         gained = PEARL.points * tier;
-        sparkle(this, pearl.x, pearl.y, '#7fe7ff', 10);
+        burst(this, pearl.x, pearl.y, '#7fe7ff', 10);
       }
       s.score += gained;
       events.pearlTier = tier;
-      floatText(this, pearl.x, pearl.y - 14, `+${gained}`, colour);
+      popup(this, pearl.x, pearl.y - 14, `+${gained}`, colour);
       const nextLevel = Math.min(LEVEL.max, 1 + Math.floor(s.pearlsCollected / LEVEL.pearlsPerLevel));
       if (nextLevel > s.level) {
         s.level = nextLevel;
         events.levelUp = true;
-        floatText(this, p.x, p.y - 44, `Level ${s.level}`, '#ffd76a');
+        popup(this, p.x, p.y - 44, `Level ${s.level}`, '#ffd76a');
       }
       const nextZone = zoneOf(s.pearlsCollected);
       if (nextZone > s.zone) {
         s.zone = nextZone;
         events.zoneUp = true;
-        floatText(this, p.x, p.y - 64, ZONES[nextZone].name, '#aef3ff');
+        popup(this, p.x, p.y - 64, ZONES[nextZone].name, '#aef3ff');
       }
       if (s.pearlsCollected >= PEARLS_TO_WIN) {
         s.over = 'win';
@@ -513,32 +517,32 @@ export class World {
 
     // --- Glow orbs refill the lamp ---
     for (const orb of s.orbs) {
-      if (!orb.active || distanceTo(orb) > orb.radius + p.radius) continue;
+      if (!orb.active || distTo(orb) > orb.radius + p.radius) continue;
       orb.active = false;
       s.light = Math.min(LIGHT_START, s.light + LIGHT_ORB_REFILL);
       s.score += ORB.points;
       events.orb = true;
-      sparkle(this, orb.x, orb.y, '#ffc94d', 14);
-      floatText(this, orb.x, orb.y - 14, `+${ORB.points} light!`, '#ffe9a8');
+      burst(this, orb.x, orb.y, '#ffc94d', 14);
+      popup(this, orb.x, orb.y - 14, `+${ORB.points} light!`, '#ffe9a8');
     }
     s.orbs = s.orbs.filter((orb) => orb.active);
 
     // --- Heart pickups grant an extra life ---
     for (const heart of s.hearts) {
-      if (!heart.active || distanceTo(heart) > heart.radius + p.radius) continue;
+      if (!heart.active || distTo(heart) > heart.radius + p.radius) continue;
       heart.active = false;
       if (s.lives < MAX_LIVES) s.lives += 1;
       s.score += 15;
       events.heart = true;
-      sparkle(this, heart.x, heart.y, '#ff7fa5', 14);
-      floatText(this, heart.x, heart.y - 14, '+1 life!', '#ff8fa3');
+      burst(this, heart.x, heart.y, '#ff7fa5', 14);
+      popup(this, heart.x, heart.y - 14, '+1 life!', '#ff8fa3');
     }
     s.hearts = s.hearts.filter((heart) => heart.active);
 
     // --- Anglerfish bites cost a life, some light, and the chain ---
     if (p.invulnerable <= 0) {
       for (const angler of s.anglers) {
-        if (!angler.active || distanceTo(angler) > angler.radius + p.radius - 6) continue;
+        if (!angler.active || distTo(angler) > angler.radius + p.radius - 6) continue;
         angler.active = false;
         if (this.hurt(s, angler.x, angler.y, events)) return events;
         break;
@@ -549,7 +553,7 @@ export class World {
     // --- Jellyfish stings ---
     if (p.invulnerable <= 0 && s.over === null) {
       for (const jelly of s.jellies) {
-        if (!jelly.active || distanceTo(jelly) > jelly.radius + p.radius - 4) continue;
+        if (!jelly.active || distTo(jelly) > jelly.radius + p.radius - 4) continue;
         jelly.active = false;
         if (this.hurt(s, jelly.x, jelly.y, events)) return events;
         break;
@@ -559,12 +563,12 @@ export class World {
 
     // --- The boss's bite ---
     if (p.invulnerable <= 0 && s.over === null && s.boss !== null && s.boss.active) {
-      if (distanceTo(s.boss) <= s.boss.radius + p.radius - 10) {
+      if (distTo(s.boss) <= s.boss.radius + p.radius - 10) {
         if (this.hurt(s, s.boss.x, s.boss.y, events)) return events;
       }
     }
 
-    // --- Particles and floating text fade out ---
+    // --- Particles and floating labels fade out ---
     for (const particle of s.particles) {
       particle.x += particle.vx * dt;
       particle.y += particle.vy * dt;

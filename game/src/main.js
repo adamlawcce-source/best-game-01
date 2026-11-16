@@ -27,7 +27,7 @@ const hud = {
   mute: document.getElementById('btn-mute'),
   pause: document.getElementById('btn-pause'),
 };
-const overlays = {
+const panels = {
   menu: document.getElementById('menu'),
   pause: document.getElementById('pause'),
   win: document.getElementById('win'),
@@ -54,7 +54,7 @@ let lastTime = performance.now();
 let accumulator = 0;
 let announced = '';
 let bannerTimer = null;
-let lastHud = '';
+let hudCache = '';
 
 function loadBest() {
   try {
@@ -87,12 +87,14 @@ function showBanner(text) {
   }, 1800);
 }
 
-function showOverlay(name) {
-  for (const [key, el] of Object.entries(overlays)) {
+/** Show one overlay panel (menu, pause, win, lose) and hide the rest; null hides all. */
+function showPanel(name) {
+  for (const [key, el] of Object.entries(panels)) {
     el.classList.toggle('hidden', key !== name);
   }
 }
 
+/** The HUD only touches the DOM when a value actually changed. */
 function updateHud() {
   const s = world.state;
   const tier = world.comboTier();
@@ -101,8 +103,8 @@ function updateHud() {
     tier, s.zone, Math.round(s.dashCooldown * 10), best,
     screen, sounds.muted,
   ].join('|');
-  if (key === lastHud) return;
-  lastHud = key;
+  if (key === hudCache) return;
+  hudCache = key;
   hud.score.textContent = String(s.score);
   hud.pearls.textContent = `${s.pearlsCollected}/${PEARLS_TO_WIN}`;
   hud.light.style.width = `${Math.max(0, Math.min(100, s.light))}%`;
@@ -119,7 +121,7 @@ function startRun() {
   world.reset();
   renderer.clearWorld();
   screen = SCREEN_PLAY;
-  showOverlay(null);
+  showPanel(null);
   announce('Diving. Gather 30 pearls. Watch your light.');
 }
 
@@ -132,12 +134,12 @@ function endRun(won) {
   if (won) {
     sounds.win();
     winText.textContent = `The Heart of the Deep is yours. Final score ${world.state.score} — best ${best}.`;
-    showOverlay('win');
+    showPanel('win');
     announce(`You lit the reef! Final score ${world.state.score}. Press R to dive again.`);
   } else {
     sounds.lose();
     loseText.textContent = `Pearls ${world.state.pearlsCollected} of ${PEARLS_TO_WIN} — final score ${world.state.score}, best ${best}.`;
-    showOverlay('lose');
+    showPanel('lose');
     announce(`The light went out. Final score ${world.state.score}. Press R to dive again.`);
   }
 }
@@ -145,27 +147,27 @@ function endRun(won) {
 function toggleMute() {
   const muted = sounds.toggleMute();
   announce(muted ? 'Sound off.' : 'Sound on.');
-  lastHud = '';
+  hudCache = '';
   updateHud();
 }
 
 function togglePause() {
   if (screen === SCREEN_PLAY) {
     screen = SCREEN_PAUSE;
-    showOverlay('pause');
+    showPanel('pause');
     announce('Paused. Press P to keep diving.');
   } else if (screen === SCREEN_PAUSE) {
     screen = SCREEN_PLAY;
-    showOverlay(null);
+    showPanel(null);
     announce('Diving.');
   }
 }
 
-function handleMenuKeys() {
+function onMenuKeys() {
   if (input.takePressed('Enter') || input.takePressed('Space') || input.takePressed('Pointer')) startRun();
 }
 
-function handleEndKeys() {
+function onEndKeys() {
   if (input.takePressed('KeyR') || input.takePressed('Enter') || input.takePressed('Space') || input.takePressed('Pointer')) startRun();
 }
 
@@ -173,16 +175,26 @@ function stepGame() {
   const events = world.step(STEP, input.steering());
   if (events.pearlTier > 0) sounds.pickup(events.pearlTier);
   if (events.orb) sounds.orb();
-  if (events.golden) showBanner('Golden pearl! +light');
-  if (events.heart) showBanner('+1 life!');
+  if (events.golden) {
+    sounds.golden();
+    showBanner('Golden pearl! +light');
+  }
+  if (events.heart) {
+    sounds.heartPickup();
+    showBanner('+1 life!');
+  }
   if (events.dash) sounds.dash();
   if (events.levelUp) {
     sounds.levelUp();
     showBanner(`Level ${world.state.level}`);
   }
   if (events.zoneUp) {
-    sounds.levelUp();
+    sounds.zone();
     showBanner(ZONES[world.state.zone].name);
+  }
+  if (events.boss) {
+    sounds.boss();
+    showBanner('Something huge stirs...');
   }
   if (events.hit) sounds.hit();
   if (events.over === EVENT_WIN) endRun(true);
@@ -197,8 +209,8 @@ function frame(now) {
   if (input.takePressed('KeyM')) toggleMute();
   if (input.takePressed('KeyP')) togglePause();
 
-  if (screen === SCREEN_MENU) handleMenuKeys();
-  if (screen === SCREEN_WIN || screen === SCREEN_LOSE) handleEndKeys();
+  if (screen === SCREEN_MENU) onMenuKeys();
+  if (screen === SCREEN_WIN || screen === SCREEN_LOSE) onEndKeys();
 
   if (screen === SCREEN_PLAY) {
     let guard = 0;
@@ -224,17 +236,21 @@ hud.mute.addEventListener('click', () => {
   toggleMute();
 });
 hud.pause.addEventListener('click', () => togglePause());
+// The pointer steers in logical field coordinates: fit the 1280x720 field into the
+// window (letterboxed) and tell input that mapping, on load and on every resize.
+function fitViewport() {
+  const scale = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+  input.setViewport(
+    scale,
+    (window.innerWidth - 1280 * scale) / 2,
+    (window.innerHeight - 720 * scale) / 2,
+  );
+}
 window.addEventListener('resize', () => {
   renderer.resize();
-  input.setViewport(1, 0, 0);
+  fitViewport();
 });
-// The pointer steers in logical field coordinates: the 3D view covers the whole field,
-// so map the canvas pixel position onto the 1280x720 field.
-input.setViewport(
-  Math.min(window.innerWidth / 1280, window.innerHeight / 720),
-  (window.innerWidth - 1280 * Math.min(window.innerWidth / 1280, window.innerHeight / 720)) / 2,
-  (window.innerHeight - 720 * Math.min(window.innerWidth / 1280, window.innerHeight / 720)) / 2,
-);
+fitViewport();
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
@@ -246,18 +262,18 @@ if (shot !== null) {
   best = staged.best;
   if (screen === SCREEN_WIN) {
     winText.textContent = `The Heart of the Deep is yours. Final score ${world.state.score} — best ${best}.`;
-    showOverlay('win');
+    showPanel('win');
   } else if (screen === SCREEN_LOSE) {
     loseText.textContent = `Pearls ${world.state.pearlsCollected} of ${PEARLS_TO_WIN} — final score ${world.state.score}, best ${best}.`;
-    showOverlay('lose');
+    showPanel('lose');
   } else {
-    showOverlay(screen === SCREEN_MENU ? 'menu' : null);
+    showPanel(screen === SCREEN_MENU ? 'menu' : null);
   }
   updateHud();
   renderer.render(world.state, screen, { best, muted: false, now: 6.4 });
   document.title = `Glimmerdeep 3D — ${shot}`;
 } else {
-  showOverlay('menu');
+  showPanel('menu');
   announce('Glimmerdeep. Press Enter or click to dive.');
   requestAnimationFrame(frame);
 }

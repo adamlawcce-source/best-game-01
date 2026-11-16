@@ -1,6 +1,9 @@
-// Every sound in the game is synthesised with WebAudio: no sound files, no network.
-// The context is built lazily on the first player gesture, so a page that only shows the
-// title screen stays silent, and every call is a no-op while muted or before that gesture.
+// Glimmerdeep 3D's sound: every effect is synthesised live with WebAudio, so the game
+// ships no sound files and makes no network requests. The AudioContext is created lazily
+// on the first player gesture (browsers forbid sound before one), and every effect is a
+// no-op while muted or before that first gesture, so the title screen stays silent.
+
+const MASTER_VOLUME = 0.5;
 
 export class SoundBank {
   constructor() {
@@ -20,7 +23,7 @@ export class SoundBank {
       if (!AudioContext) return;
       this.context = new AudioContext();
       this.master = this.context.createGain();
-      this.master.gain.value = 0.5;
+      this.master.gain.value = MASTER_VOLUME;
       this.master.connect(this.context.destination);
     } catch {
       this.context = null;
@@ -29,97 +32,120 @@ export class SoundBank {
 
   toggleMute() {
     this.muted = !this.muted;
-    if (this.master) this.master.gain.value = this.muted ? 0 : 0.5;
+    if (this.master) this.master.gain.value = this.muted ? 0 : MASTER_VOLUME;
     return this.muted;
   }
 
-  /** One oscillator note with a quick attack and an exponential tail. */
-  tone({ frequency, endFrequency = null, type = 'sine', at = 0, length = 0.18, volume = 0.5 }) {
+  /** A single oscillator voice: quick attack, exponential tail, optional glide. */
+  note({ freq, glideTo = null, wave = 'sine', delay = 0, dur = 0.18, vol = 0.5 }) {
     if (this.context === null || this.master === null || this.muted) return;
-    const start = this.context.currentTime + at;
-    const oscillator = this.context.createOscillator();
-    const gain = this.context.createGain();
-    oscillator.type = type;
-    oscillator.frequency.setValueAtTime(frequency, start);
-    if (endFrequency !== null) oscillator.frequency.exponentialRampToValueAtTime(Math.max(1, endFrequency), start + length);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(volume, start + 0.012);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + length);
-    oscillator.connect(gain);
-    gain.connect(this.master);
-    oscillator.start(start);
-    oscillator.stop(start + length + 0.05);
+    const at = this.context.currentTime + delay;
+    const osc = this.context.createOscillator();
+    const amp = this.context.createGain();
+    osc.type = wave;
+    osc.frequency.setValueAtTime(freq, at);
+    if (glideTo !== null) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(1, glideTo), at + dur);
+    }
+    amp.gain.setValueAtTime(0.0001, at);
+    amp.gain.exponentialRampToValueAtTime(vol, at + 0.012);
+    amp.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    osc.connect(amp);
+    amp.connect(this.master);
+    osc.start(at);
+    osc.stop(at + dur + 0.05);
   }
 
-  /** A short filtered noise burst, for bumps and splashes. */
-  noise({ at = 0, length = 0.15, volume = 0.3, cutoff = 900 }) {
+  /** A short burst of filtered noise: bumps, splashes, the dash whoosh. */
+  burst({ delay = 0, dur = 0.15, vol = 0.3, cutoff = 900 }) {
     if (this.context === null || this.master === null || this.muted) return;
-    const start = this.context.currentTime + at;
-    const frames = Math.max(1, Math.floor(this.context.sampleRate * length));
+    const at = this.context.currentTime + delay;
+    const frames = Math.max(1, Math.floor(this.context.sampleRate * dur));
     const buffer = this.context.createBuffer(1, frames, this.context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < frames; i += 1) data[i] = (Math.random() * 2 - 1) * (1 - i / frames);
-    const source = this.context.createBufferSource();
-    source.buffer = buffer;
+    const samples = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i += 1) {
+      samples[i] = (Math.random() * 2 - 1) * (1 - i / frames);
+    }
+    const src = this.context.createBufferSource();
+    src.buffer = buffer;
     const filter = this.context.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value = cutoff;
-    const gain = this.context.createGain();
-    gain.gain.setValueAtTime(volume, start);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + length);
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.master);
-    source.start(start);
+    const amp = this.context.createGain();
+    amp.gain.setValueAtTime(vol, at);
+    amp.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    src.connect(filter);
+    filter.connect(amp);
+    amp.connect(this.master);
+    src.start(at);
+  }
+
+  /** A little melody: [frequency, delay, duration] steps on one waveform. */
+  tune(steps, wave = 'triangle', vol = 0.35) {
+    steps.forEach(([freq, delay, dur]) => {
+      this.note({ freq, delay, dur, wave, vol });
+    });
   }
 
   /** A pearl collected: a bright two-note blip that climbs with the combo tier. */
   pickup(tier = 1) {
     const base = 660 + (tier - 1) * 110;
-    this.tone({ frequency: base, type: 'sine', length: 0.1, volume: 0.4 });
-    this.tone({ frequency: base * 1.5, at: 0.07, type: 'sine', length: 0.16, volume: 0.4 });
+    this.note({ freq: base, dur: 0.1, vol: 0.4 });
+    this.note({ freq: base * 1.5, delay: 0.07, dur: 0.16, vol: 0.4 });
   }
 
-  /** A glow orb: a warm three-note chord that refills the light. */
+  /** A golden pearl: a richer four-note sparkle, worth more than a plain pearl. */
+  golden() {
+    this.tune([[880, 0, 0.1], [1109, 0.06, 0.1], [1319, 0.12, 0.14], [1760, 0.18, 0.22]], 'sine', 0.4);
+  }
+
+  /** A glow orb: a warm three-note chord that refills the lamp. */
   orb() {
-    this.tone({ frequency: 392, type: 'triangle', length: 0.22, volume: 0.35 });
-    this.tone({ frequency: 494, at: 0.05, type: 'triangle', length: 0.22, volume: 0.35 });
-    this.tone({ frequency: 587, at: 0.1, type: 'triangle', length: 0.3, volume: 0.35 });
+    this.tune([[392, 0, 0.22], [494, 0.05, 0.22], [587, 0.1, 0.3]], 'triangle', 0.35);
   }
 
-  /** A dash: a quick whoosh up the scale. */
+  /** A heart pickup: a soft two-note lift for the extra life. */
+  heartPickup() {
+    this.tune([[659, 0, 0.18], [988, 0.1, 0.3]], 'sine', 0.4);
+  }
+
+  /** A dash: a quick rising whoosh. */
   dash() {
-    this.tone({ frequency: 300, endFrequency: 900, type: 'sine', length: 0.16, volume: 0.3 });
-    this.noise({ length: 0.12, volume: 0.15, cutoff: 2400 });
+    this.note({ freq: 300, glideTo: 900, dur: 0.16, vol: 0.3 });
+    this.burst({ dur: 0.12, vol: 0.15, cutoff: 2400 });
   }
 
-  /** An anglerfish bite: a low thud with a splash of noise. */
+  /** An anglerfish bite or a jellyfish sting: a low thud with a splash of noise. */
   hit() {
-    this.tone({ frequency: 160, endFrequency: 55, type: 'sawtooth', length: 0.28, volume: 0.5 });
-    this.noise({ length: 0.18, volume: 0.3, cutoff: 700 });
+    this.note({ freq: 160, glideTo: 55, wave: 'sawtooth', dur: 0.28, vol: 0.5 });
+    this.burst({ dur: 0.18, vol: 0.3, cutoff: 700 });
+  }
+
+  /** The boss surfaces: a deep two-note drone from below. */
+  boss() {
+    this.note({ freq: 98, glideTo: 65, wave: 'sawtooth', dur: 0.7, vol: 0.45 });
+    this.note({ freq: 147, delay: 0.15, glideTo: 98, wave: 'sawtooth', dur: 0.6, vol: 0.3 });
+    this.burst({ dur: 0.4, vol: 0.2, cutoff: 400 });
   }
 
   /** A level up: a quick rising chime. */
   levelUp() {
-    this.tone({ frequency: 523, type: 'triangle', length: 0.12, volume: 0.35 });
-    this.tone({ frequency: 659, at: 0.09, type: 'triangle', length: 0.12, volume: 0.35 });
-    this.tone({ frequency: 784, at: 0.18, type: 'triangle', length: 0.2, volume: 0.35 });
+    this.tune([[523, 0, 0.12], [659, 0.09, 0.12], [784, 0.18, 0.2]], 'triangle', 0.35);
+  }
+
+  /** A new zone: a slow deep chime, darker than a level-up. */
+  zone() {
+    this.tune([[330, 0, 0.3], [415, 0.14, 0.3], [494, 0.28, 0.45]], 'sine', 0.4);
   }
 
   /** The win: a slow rising arpeggio over the tonic. */
   win() {
-    const notes = [523, 659, 784, 1047, 1319];
-    notes.forEach((frequency, i) => {
-      this.tone({ frequency, at: i * 0.13, type: 'triangle', length: 0.35, volume: 0.4 });
-    });
-    this.tone({ frequency: 262, type: 'sine', length: 0.9, volume: 0.3 });
+    this.tune([[523, 0, 0.35], [659, 0.13, 0.35], [784, 0.26, 0.35], [1047, 0.39, 0.35], [1319, 0.52, 0.5]], 'triangle', 0.4);
+    this.note({ freq: 262, dur: 0.9, vol: 0.3 });
   }
 
   /** The loss: a short descending line that settles low. */
   lose() {
-    const notes = [392, 330, 262, 196];
-    notes.forEach((frequency, i) => {
-      this.tone({ frequency, at: i * 0.16, type: 'sine', length: 0.3, volume: 0.4 });
-    });
+    this.tune([[392, 0, 0.3], [330, 0.16, 0.3], [262, 0.32, 0.3], [196, 0.48, 0.4]], 'sine', 0.4);
   }
 }

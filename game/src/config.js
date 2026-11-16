@@ -1,6 +1,6 @@
-// Every tuning number and colour for Glimmerdeep 3D in one place. The simulation still
-// runs on a fixed 1280x720 logical field; the 3D renderer maps it onto a seabed plane
-// (FIELD.width / WORLD_SCALE units wide), so no rule below depends on the screen size.
+// Glimmerdeep 3D's tuning: every number and colour in one place. The simulation runs
+// on a fixed 1280x720 logical field; the 3D renderer maps it onto a seabed plane that is
+// FIELD.width / WORLD_SCALE units wide, so no rule below depends on the screen size.
 
 export const FIELD = { width: 1280, height: 720 };
 
@@ -39,7 +39,7 @@ export const PEARL = {
   drift: 46,
 };
 
-/** Every GOLDEN_EVERY-th pearl spawned is golden: more points and light back. */
+/** Every GOLDEN.every-th pearl spawned is golden: more points and light back. */
 export const GOLDEN = { every: 7, points: 25, lightRefill: 20, radius: 15 };
 
 /** The 30th pearl is the Heart of the Deep: big, pink-gold, worth 50, ends the run. */
@@ -80,7 +80,7 @@ export const BOSS = { radius: 58, speed: 95, appearAt: 25 };
 /** Six pearls per level; speeds and spawn rates stop growing at the last level. */
 export const LEVEL = { pearlsPerLevel: 6, max: 8 };
 
-/** Three zones, crossed as pearls are collected: new colours, fog and enemies. */
+/** The three zones, crossed as pearls are collected: new colours, fog and enemies. */
 export const ZONES = [
   {
     name: 'Shallow Reef',

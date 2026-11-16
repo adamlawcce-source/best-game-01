@@ -1,6 +1,6 @@
 // The screenshot scenes behind ?shot=menu|play|deep|abyss|win|end. Each one plays the
 // real rules forward from a fresh world for a fixed number of steps, steered by a simple
-// autopilot that chases the nearest pearl and keeps clear of anglerfish, so the frame is
+// autopilot that chases the nearest pearl and keeps clear of hunters, so the frame is
 // what a short game really looks like. The end scene's pilot is careless: it chases
 // pearls and ignores the hunters, so it is caught out, as a hurried player is. The deep,
 // abyss and win scenes fast-forward the careful pilot until the run reaches that zone,
@@ -14,14 +14,13 @@ const MENU_SECONDS = 5;
 const PLAY_SECONDS = 26;
 const END_LIMIT_SECONDS = 600;
 const FAST_LIMIT_SECONDS = 900;
-const FLEE_DISTANCE = 180;
+const FLEE_RADIUS = 180;
 const SAMPLE = STEP;
 
-/** The nearest active pearl, or the nearest orb when the lamp is running low. */
-function pickTarget(state) {
+/** The nearest pearl to chase — the Heart of the Deep first, late in the run. */
+function pickPrey(state) {
   let target = null;
   let bestDistance = Infinity;
-  // Late in the run, chase the Heart of the Deep first.
   const heartPearls = state.pearls.filter((pearl) => pearl.kind === 'heart-pearl');
   const pool = heartPearls.length > 0
     ? heartPearls
@@ -37,21 +36,21 @@ function pickTarget(state) {
   return target;
 }
 
-/** The nearest anglerfish or jellyfish and how far away it is. */
-function nearestThreat(state) {
+/** The nearest hunter (angler, jelly or boss) and how far away it is. */
+function nearestDanger(state) {
   let nearest = null;
   let bestDistance = Infinity;
-  const threats = [...state.anglers, ...state.jellies];
-  if (state.boss !== null) threats.push(state.boss);
-  for (const threat of threats) {
-    if (!threat.active) continue;
-    const distance = Math.hypot(threat.x - state.player.x, threat.y - state.player.y);
+  const dangers = [...state.anglers, ...state.jellies];
+  if (state.boss !== null) dangers.push(state.boss);
+  for (const danger of dangers) {
+    if (!danger.active) continue;
+    const distance = Math.hypot(danger.x - state.player.x, danger.y - state.player.y);
     if (distance < bestDistance) {
       bestDistance = distance;
-      nearest = threat;
+      nearest = danger;
     }
   }
-  return { threat: nearest, distance: bestDistance };
+  return { danger: nearest, distance: bestDistance };
 }
 
 function clampUnit(value) {
@@ -59,30 +58,30 @@ function clampUnit(value) {
 }
 
 /**
- * Steering for one step. A careful pilot blends a chase vector toward its target with a
- * flee vector away from any threat too close, and dashes when one gets very close; a
+ * Steering for one step. A careful pilot blends a chase vector toward its prey with a
+ * flee vector away from any danger too close, and dashes when one gets very close; a
  * careless one chases and nothing else.
  */
 export function autopilot(state, careful) {
   const player = state.player;
-  const target = pickTarget(state);
+  const prey = pickPrey(state);
   let vx = 0;
   let vy = 0;
-  if (target !== null) {
-    const dx = target.x - player.x;
-    const dy = target.y - player.y;
+  if (prey !== null) {
+    const dx = prey.x - player.x;
+    const dy = prey.y - player.y;
     const distance = Math.hypot(dx, dy) || 1;
     vx = dx / distance;
     vy = dy / distance;
   }
   let dash = false;
   if (careful) {
-    const { threat, distance } = nearestThreat(state);
-    if (threat !== null && distance < FLEE_DISTANCE) {
-      const dx = player.x - threat.x;
-      const dy = player.y - threat.y;
+    const { danger, distance } = nearestDanger(state);
+    if (danger !== null && distance < FLEE_RADIUS) {
+      const dx = player.x - danger.x;
+      const dy = player.y - danger.y;
       const length = Math.hypot(dx, dy) || 1;
-      const strength = (FLEE_DISTANCE - distance) / FLEE_DISTANCE;
+      const strength = (FLEE_RADIUS - distance) / FLEE_RADIUS;
       // Close danger takes over: flee hard, barely chase.
       vx = vx * 0.35 + (dx / length) * strength * 2.2;
       vy = vy * 0.35 + (dy / length) * strength * 2.2;
@@ -93,7 +92,7 @@ export function autopilot(state, careful) {
 }
 
 /** Run the careful pilot until `done(state)` is true, the run ends, or time runs out. */
-function fastForward(world, done) {
+function runUntil(world, done) {
   let events = { over: 0 };
   for (let index = 0; index < FAST_LIMIT_SECONDS / SAMPLE; index += 1) {
     events = world.step(SAMPLE, autopilot(world.state, true));
@@ -117,19 +116,19 @@ export function stageShot(name, world, seconds = null) {
     return { screen: SCREEN_MENU, best: 0 };
   }
   if (name === 'deep') {
-    const events = fastForward(world, (state) => state.zone >= 1 && state.pearlsCollected >= 12);
+    const events = runUntil(world, (state) => state.zone >= 1 && state.pearlsCollected >= 12);
     if (events.over === EVENT_WIN) return { screen: SCREEN_WIN, best: world.state.score };
     if (events.over === EVENT_LOSE) return { screen: SCREEN_LOSE, best: world.state.score };
     return { screen: SCREEN_PLAY, best: world.state.score };
   }
   if (name === 'abyss') {
-    const events = fastForward(world, (state) => state.boss !== null && state.pearlsCollected >= 26);
+    const events = runUntil(world, (state) => state.boss !== null && state.pearlsCollected >= 26);
     if (events.over === EVENT_WIN) return { screen: SCREEN_WIN, best: world.state.score };
     if (events.over === EVENT_LOSE) return { screen: SCREEN_LOSE, best: world.state.score };
     return { screen: SCREEN_PLAY, best: world.state.score };
   }
   if (name === 'win') {
-    const events = fastForward(world, (state) => state.over === 'win');
+    const events = runUntil(world, (state) => state.over === 'win');
     if (events.over === EVENT_WIN) return { screen: SCREEN_WIN, best: world.state.score };
     if (events.over === EVENT_LOSE) return { screen: SCREEN_LOSE, best: world.state.score };
     return { screen: SCREEN_PLAY, best: world.state.score };
