@@ -87,6 +87,12 @@ export class SoundBank {
     this.tone({ frequency: 587, at: 0.1, type: 'triangle', length: 0.3, volume: 0.35 });
   }
 
+  /** A dash: a quick whoosh up the scale. */
+  dash() {
+    this.tone({ frequency: 300, endFrequency: 900, type: 'sine', length: 0.16, volume: 0.3 });
+    this.noise({ length: 0.12, volume: 0.15, cutoff: 2400 });
+  }
+
   /** An anglerfish bite: a low thud with a splash of noise. */
   hit() {
     this.tone({ frequency: 160, endFrequency: 55, type: 'sawtooth', length: 0.28, volume: 0.5 });

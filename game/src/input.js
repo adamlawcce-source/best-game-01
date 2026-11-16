@@ -69,6 +69,7 @@ export class Input {
       x: (right ? 1 : 0) - (left ? 1 : 0),
       y: (down ? 1 : 0) - (up ? 1 : 0),
       pointer: this.pointer.down ? { x: this.pointer.x, y: this.pointer.y } : null,
+      dash: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
     };
   }
 
