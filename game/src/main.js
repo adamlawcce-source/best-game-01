@@ -44,6 +44,7 @@ const world = new World(20261116);
 // A tiny handle for live testing (headless play-tests read the state through it).
 window.__glimmerdeep = {
   world,
+  ready: renderer.ready,
   get screen() { return screen; },
   get best() { return best; },
 };
@@ -270,10 +271,14 @@ if (shot !== null) {
     showPanel(screen === SCREEN_MENU ? 'menu' : null);
   }
   updateHud();
+  // Models load in the background; wait for them so the staged frame shows the
+  // real fish, enemies and reef instead of an empty scene.
+  await renderer.ready;
   renderer.render(world.state, screen, { best, muted: false, now: 6.4 });
   document.title = `Glimmerdeep 3D — ${shot}`;
 } else {
   showPanel('menu');
   announce('Glimmerdeep. Press Enter or click to dive.');
+  await renderer.ready;
   requestAnimationFrame(frame);
 }

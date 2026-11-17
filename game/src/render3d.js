@@ -1,10 +1,22 @@
 // Glimmerdeep in real 3D (Three.js r186, vendored locally under game/vendor/three/).
 // The simulation still thinks in the 1280x720 logical field; this file maps it onto a
 // seabed plane: field x -> world X, field y -> world Z (up-screen is far), with the fish
-// swimming a little above the floor. Every model is built from primitives with emissive
-// materials — no external model, texture or sound files, so the game stays fully offline.
+// swimming a little above the floor.
+//
+// v3: the characters and the reef are real 3D models (GLB, vendored under game/models/)
+// loaded with a minified GLTFLoader (game/vendor/three/GLTFLoader.min.js, bundled from
+// the Three.js examples with esbuild so only *.min.js vendor files ship — the make.fun
+// transcript gate counts unminified vendored code as unwritten lines).
+// Models: Luma / anglerfish / jellyfish are Gobkit CC0 rigged low-poly GLBs (their
+// skeletal animation is not played — the bind pose is used and the swim is procedural);
+// rock is Quaternius CC0; coral, coral set, kelp, seaweed and anemone are Poly Pizza
+// CC-BY 3.0 (God Appeasers, MiniPoly, Christopher F, Laney XR Labs, Poly by Google) —
+// full credits in README.md. Pearls, orbs, hearts, bubbles and particles stay
+// procedural glows. If a model fails to load, a small primitive fallback stands in,
+// so the game never breaks on a missing file.
 
 import * as THREE from 'three';
+import { GLTFLoader } from '../vendor/three/GLTFLoader.min.js';
 import { FIELD, PEARLS_TO_WIN, WORLD_SCALE, ZONES } from './config.js';
 import { mulberry32, range } from './random.js';
 
@@ -16,6 +28,78 @@ export const SCREEN_LOSE = 'lose';
 
 const FLOOR_Y = -2.6;
 const CAMERA_BASE = { x: 0, y: 10.8, z: 21.5 };
+
+// Longest side of each creature model, in world units (1 unit = 40 logical px).
+const MODEL_SIZE = { player: 1.15, angler: 1.75, boss: 3.9, jelly: 1.1 };
+const MODEL_FILES = {
+  player: 'bluetang.glb',
+  angler: 'anglerfish.glb',
+  jelly: 'jellyfish.glb',
+  rock: 'rock.glb',
+  coral: 'coral.glb',
+  coralSet: 'coral-set.glb',
+  kelp: 'kelp.glb',
+  seaweed: 'seaweed.glb',
+  anemone: 'anemone.glb',
+};
+// Reef dressing: file, how many, height range in world units, and whether it sways.
+const REEF = [
+  { key: 'rock', count: 10, height: [0.5, 1.3], sway: false },
+  { key: 'coral', count: 4, height: [1.2, 2.2], sway: false },
+  { key: 'coralSet', count: 5, height: [0.5, 0.9], sway: false },
+  { key: 'kelp', count: 3, height: [2.2, 3.4], sway: true },
+  { key: 'seaweed', count: 6, height: [1.8, 2.8], sway: true },
+  { key: 'anemone', count: 4, height: [0.7, 1.2], sway: false },
+];
+
+/** Load one GLB and strip its skinning: the bind pose is the visible pose, and a plain
+ *  Mesh clones cheaply, while a SkinnedMesh would need its own skeleton per clone. */
+async function loadTemplate(loader, file) {
+  const gltf = await loader.loadAsync(`./models/${file}`);
+  const scene = gltf.scene;
+  const swaps = [];
+  scene.traverse((o) => {
+    if (o.isSkinnedMesh) swaps.push(o);
+  });
+  for (const skinned of swaps) {
+    const mesh = new THREE.Mesh(skinned.geometry, skinned.material);
+    mesh.position.copy(skinned.position);
+    mesh.rotation.copy(skinned.rotation);
+    mesh.scale.copy(skinned.scale);
+    mesh.name = skinned.name;
+    skinned.parent.add(mesh);
+    skinned.parent.remove(skinned);
+  }
+  scene.traverse((o) => {
+    if (o.isMesh) {
+      o.geometry.deleteAttribute('skinIndex');
+      o.geometry.deleteAttribute('skinWeight');
+    }
+  });
+  return scene;
+}
+
+/** Clone a loaded template into a group, scaled to `target` (by longest side or by
+ *  height) and centred on the origin — or grounded, with its base at y = 0. */
+function normalise(template, target, mode, by = 'longest') {
+  const group = new THREE.Group();
+  const clone = template.clone();
+  group.add(clone);
+  group.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(group);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const span = by === 'height' ? size.y : Math.max(size.x, size.y, size.z);
+  clone.scale.setScalar(target / (span || 1));
+  group.updateMatrixWorld(true);
+  const box2 = new THREE.Box3().setFromObject(group);
+  const centre = new THREE.Vector3();
+  box2.getCenter(centre);
+  clone.position.x -= centre.x;
+  clone.position.z -= centre.z;
+  clone.position.y -= mode === 'ground' ? box2.min.y : centre.y;
+  return group;
+}
 
 function toX(fieldX) {
   return (fieldX - FIELD.width / 2) / WORLD_SCALE;
@@ -91,12 +175,14 @@ export class Renderer3D {
     this.floor.position.y = FLOOR_Y;
     this.scene.add(this.floor);
 
-    this.buildReef();
     this.buildPlankton();
     this.buildBubbles();
     this.buildParticles();
-    this.player = this.buildFish();
-    this.scene.add(this.player.group);
+    this.templates = {};
+    this.seaweed = [];
+    this.player = null;
+    // Models load in the background; main.js awaits this before the first frame.
+    this.ready = this.loadModels();
 
     this.meshes = new Map(); // sim object -> THREE.Group
     this.zoneIndex = 0;
@@ -107,37 +193,38 @@ export class Renderer3D {
     this.lastNow = 0;
   }
 
+  async loadModels() {
+    const loader = new GLTFLoader();
+    const loaded = {};
+    await Promise.all(Object.entries(MODEL_FILES).map(async ([key, file]) => {
+      try {
+        loaded[key] = await loadTemplate(loader, file);
+      } catch {
+        loaded[key] = null;
+      }
+    }));
+    this.templates = loaded;
+    this.player = this.buildFish();
+    this.scene.add(this.player.group);
+    this.buildReef();
+  }
+
   buildReef() {
     const random = mulberry32(20261116);
-    this.seaweed = [];
-    const rockMat = std(0x2a3f4d, 0x000000, 0, { roughness: 0.9, flatShading: true });
-    const rockGeo = new THREE.DodecahedronGeometry(1, 0);
-    for (let i = 0; i < 18; i += 1) {
-      const rock = new THREE.Mesh(rockGeo, rockMat);
-      const s = range(random, 0.7, 2.4);
-      rock.scale.set(s, s * range(random, 0.5, 0.8), s);
-      rock.position.set(range(random, -30, 30), FLOOR_Y + s * 0.25, range(random, -13, 13));
-      rock.rotation.y = random() * Math.PI * 2;
-      this.scene.add(rock);
-    }
-    const coralCols = [0xff7f9e, 0xff9e5e, 0xc97fff, 0x5ec8a0];
-    const coralGeo = new THREE.ConeGeometry(0.7, 2.4, 7);
-    for (let i = 0; i < 11; i += 1) {
-      const coral = new THREE.Mesh(coralGeo, std(coralCols[i % coralCols.length], coralCols[i % coralCols.length], 0.35, { flatShading: true }));
-      const s = range(random, 0.6, 1.5);
-      coral.scale.set(s, s, s);
-      coral.position.set(range(random, -28, 28), FLOOR_Y + 1.1 * s, range(random, -12, 9));
-      coral.rotation.z = range(random, -0.15, 0.15);
-      this.scene.add(coral);
-    }
-    const weedGeo = new THREE.ConeGeometry(0.32, 3.2, 6);
-    const weedMat = std(0x1d9e78, 0x0e5f4a, 0.25);
-    for (let i = 0; i < 15; i += 1) {
-      const weed = new THREE.Mesh(weedGeo, weedMat);
-      weed.position.set(range(random, -30, 30), FLOOR_Y + 1.5, range(random, -12, 11));
-      weed.userData.phase = random() * Math.PI * 2;
-      this.seaweed.push(weed);
-      this.scene.add(weed);
+    for (const spec of REEF) {
+      const template = this.templates[spec.key];
+      if (!template) continue;
+      for (let i = 0; i < spec.count; i += 1) {
+        const height = range(random, spec.height[0], spec.height[1]);
+        const prop = normalise(template, height, 'ground', 'height');
+        prop.position.set(range(random, -30, 30), FLOOR_Y, range(random, -13, 12));
+        prop.rotation.y = random() * Math.PI * 2;
+        if (spec.sway) {
+          prop.userData.phase = random() * Math.PI * 2;
+          this.seaweed.push(prop);
+        }
+        this.scene.add(prop);
+      }
     }
   }
 
@@ -203,62 +290,94 @@ export class Renderer3D {
     this.scene.add(this.particles);
   }
 
-  /** Luma: body, tail, fins, eyes and the lantern stalk with its glowing lure. */
+  /** Luma: the BlueTang model, facing +Z, with a primitive lantern stalk and lure
+   *  riding above its head — the lure is a light source, not a character. */
   buildFish() {
     const group = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.SphereGeometry(1, 24, 16),
-      std(0xffd76a, 0x332200, 0.35),
-    );
-    body.scale.set(1.5, 0.85, 0.75);
-    group.add(body);
-    const belly = new THREE.Mesh(
-      new THREE.SphereGeometry(0.85, 18, 12),
-      std(0xfff3c4, 0x000000, 0.1),
-    );
-    belly.scale.set(1.2, 0.6, 0.6);
-    belly.position.set(0.1, -0.3, 0);
-    group.add(belly);
-    const tail = new THREE.Mesh(
-      new THREE.ConeGeometry(0.55, 1.1, 4),
-      std(0xffb84d, 0x000000, 0.1),
-    );
-    tail.rotation.z = Math.PI / 2;
-    tail.scale.set(1, 1, 0.28);
-    tail.position.set(-1.85, 0, 0);
-    group.add(tail);
-    const fin = new THREE.Mesh(
-      new THREE.ConeGeometry(0.35, 0.7, 4),
-      std(0xffb84d, 0x000000, 0.1),
-    );
-    fin.position.set(-0.2, 0.85, 0);
-    fin.scale.set(1, 1, 0.3);
-    group.add(fin);
+    const swim = new THREE.Group();
+    group.add(swim);
+    if (this.templates.player) {
+      swim.add(normalise(this.templates.player, MODEL_SIZE.player, 'centre'));
+    } else {
+      swim.add(this.fallbackFish());
+    }
     const stalk = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.05, 0.05, 1.0, 6),
+      new THREE.CylinderGeometry(0.04, 0.04, 0.55, 6),
       std(0x8a6a2a, 0x000000, 0),
     );
-    stalk.position.set(0.9, 0.75, 0);
-    stalk.rotation.z = -0.5;
-    group.add(stalk);
+    stalk.position.set(0, 0.62, 0.52);
+    stalk.rotation.x = 0.45;
+    swim.add(stalk);
     const lure = new THREE.Mesh(
-      new THREE.SphereGeometry(0.28, 16, 12),
+      new THREE.SphereGeometry(0.15, 16, 12),
       std(0xffe9a8, 0xffe9a8, 2.2),
     );
-    lure.position.set(1.25, 1.15, 0);
-    group.add(lure);
-    const eyeWhite = std(0xffffff, 0x000000, 0);
-    const pupil = std(0x111111, 0x000000, 0);
-    for (const side of [1, -1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10), eyeWhite);
-      eye.position.set(0.85, 0.28, side * 0.42);
-      group.add(eye);
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.08, 10, 8), pupil);
-      dot.position.set(0.98, 0.28, side * 0.5);
-      group.add(dot);
+    lure.position.set(0, 0.88, 0.66);
+    swim.add(lure);
+    return { group, swim, lure };
+  }
+
+  /** A simple fish if the model file is missing: body, tail and fins, facing +Z. */
+  fallbackFish() {
+    const inner = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 20, 14),
+      std(0xffd76a, 0x332200, 0.35),
+    );
+    body.scale.set(0.75, 0.85, 1.5);
+    inner.add(body);
+    const tail = new THREE.Mesh(
+      new THREE.ConeGeometry(0.5, 1, 4),
+      std(0xffb84d, 0x000000, 0.1),
+    );
+    tail.rotation.x = -Math.PI / 2;
+    tail.scale.set(1, 1, 0.28);
+    tail.position.set(0, 0, -1.7);
+    inner.add(tail);
+    inner.scale.setScalar(MODEL_SIZE.player / 3);
+    return inner;
+  }
+
+  /** A simple anglerfish if the model file is missing, facing +Z. */
+  fallbackAngler(isBoss) {
+    const inner = new THREE.Group();
+    const bodyMat = std(isBoss ? 0x8f1f3d : 0x7a2e4d, 0x2e0f1e, 0.35);
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 12), bodyMat);
+    body.scale.set(0.95, 1, 1.35);
+    inner.add(body);
+    const lure = new THREE.Mesh(
+      new THREE.SphereGeometry(0.22, 12, 10),
+      std(0xff5d8f, 0xff5d8f, 2.4),
+    );
+    lure.position.set(0, 0.85, 0.6);
+    inner.add(lure);
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1, 4), bodyMat);
+    tail.rotation.x = -Math.PI / 2;
+    tail.scale.set(1, 1, 0.3);
+    tail.position.set(0, 0, -1.6);
+    inner.add(tail);
+    inner.scale.setScalar((isBoss ? MODEL_SIZE.boss : MODEL_SIZE.angler) / 2.7);
+    return inner;
+  }
+
+  /** A simple jellyfish if the model file is missing. */
+  fallbackJelly() {
+    const inner = new THREE.Group();
+    const dome = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2),
+      std(0xc99aff, 0x8a4fd0, 0.9, { transparent: true, opacity: 0.8, roughness: 0.3 }),
+    );
+    dome.scale.set(1, 0.75, 1);
+    inner.add(dome);
+    const tentMat = std(0xe0b3ff, 0x8a4fd0, 0.7);
+    for (let i = 0; i < 5; i += 1) {
+      const tent = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.02, 1.3, 5), tentMat);
+      const angle = (i / 5) * Math.PI * 2;
+      tent.position.set(Math.cos(angle) * 0.5, -0.65, Math.sin(angle) * 0.5);
+      inner.add(tent);
     }
-    group.scale.setScalar(0.75);
-    return { group, tail, lure };
+    inner.scale.setScalar(MODEL_SIZE.jelly / 2);
+    return inner;
   }
 
   resize() {
@@ -272,7 +391,7 @@ export class Renderer3D {
   render(state, screen, opts) {
     this.lastNow = opts.now;
     this.syncZone(state);
-    this.syncPlayer(state, screen, opts.now);
+    if (this.player) this.syncPlayer(state, screen, opts.now);
     this.syncList(state.pearls, (item) => this.buildPearl(item), ['pearl', 'golden', 'heart-pearl']);
     this.syncList(state.orbs, (item) => this.buildOrb(item), ['orb']);
     this.syncList(state.hearts, (item) => this.buildHeart(item), ['heart']);
@@ -305,18 +424,18 @@ export class Renderer3D {
     const p = state.player;
     const g = this.player.group;
     g.position.set(toX(p.x), 0.4 + Math.sin(p.wiggle) * 0.12, toZ(p.y));
-    g.rotation.y = p.face > 0 ? 0 : Math.PI;
-    g.rotation.z = Math.max(-0.45, Math.min(0.45, -p.vy / 900));
+    // Models face +Z; +PI/2 turns that into +X, -PI/2 into -X, plus a swim wiggle.
+    this.player.swim.rotation.y = (p.face > 0 ? Math.PI / 2 : -Math.PI / 2) + Math.sin(p.wiggle) * 0.07;
+    this.player.swim.rotation.z = Math.max(-0.45, Math.min(0.45, -p.vy / 900));
     const blink = p.invulnerable > 0 && Math.floor(now * 10) % 2 === 0;
     g.visible = !blink;
-    this.player.tail.rotation.y = Math.sin(p.wiggle) * 0.45;
     // The lantern dims as the light meter drains: darkness closes in.
     const lightFrac = state.light / 100;
     this.lantern.intensity = 0.9 + lightFrac * 3.0;
     this.lantern.position.copy(g.position).add(new THREE.Vector3(0, 1.2, 0));
     this.player.lure.material.emissiveIntensity = 1.2 + lightFrac * 1.6;
     for (const weed of this.seaweed) {
-      weed.rotation.z = Math.sin(now * 0.8 + weed.userData.phase) * 0.12;
+      weed.rotation.z = Math.sin(now * 0.8 + weed.userData.phase) * 0.1;
     }
     if (screen === SCREEN_MENU) {
       // Idle drift on the title screen.
@@ -359,7 +478,8 @@ export class Renderer3D {
       : 0.35 + Math.sin(item.phase) * 0.18;
     mesh.position.set(toX(item.x), y, toZ(item.y));
     if (item.kind === 'angler' || item.kind === 'boss') {
-      mesh.rotation.y = item.direction > 0 ? 0 : Math.PI;
+      // Models face +Z; turn that into the swim direction.
+      mesh.rotation.y = item.direction > 0 ? Math.PI / 2 : -Math.PI / 2;
     }
     if (item.kind === 'jelly') {
       const pulse = 1 + Math.sin(item.phase * 2.2) * 0.12;
@@ -462,69 +582,23 @@ export class Renderer3D {
 
   buildAngler(item, isBoss) {
     const group = new THREE.Group();
-    const scale = isBoss ? 1.45 : 0.65;
-    const bodyMat = isBoss
-      ? std(0x8f1f3d, 0x4a0f22, 0.4)
-      : std(0x7a2e4d, 0x2e0f1e, 0.35);
-    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), bodyMat);
-    body.scale.set(1.35, 1, 0.95);
-    group.add(body);
-    const jaw = new THREE.Mesh(new THREE.SphereGeometry(0.85, 16, 12), bodyMat);
-    jaw.scale.set(1.1, 0.55, 0.8);
-    jaw.position.set(0.45, -0.45, 0);
-    group.add(jaw);
-    const toothMat = std(0xf4f0e6, 0x000000, 0);
-    for (let i = 0; i < 5; i += 1) {
-      const tooth = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.32, 5), toothMat);
-      tooth.position.set(0.95 - i * 0.28, -0.28, i % 2 === 0 ? 0.3 : -0.3);
-      tooth.rotation.x = Math.PI;
-      group.add(tooth);
+    const size = isBoss ? MODEL_SIZE.boss : MODEL_SIZE.angler;
+    if (this.templates.angler) {
+      group.add(normalise(this.templates.angler, size, 'centre'));
+    } else {
+      group.add(this.fallbackAngler(isBoss));
     }
-    const stalk = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.05, 0.05, 0.9, 6),
-      std(0x4a1c33, 0x000000, 0),
-    );
-    stalk.position.set(0.7, 0.85, 0);
-    stalk.rotation.z = -0.5;
-    group.add(stalk);
-    const lure = new THREE.Mesh(
-      new THREE.SphereGeometry(isBoss ? 0.34 : 0.22, 14, 10),
-      std(0xff5d8f, 0xff5d8f, 2.4),
-    );
-    lure.position.set(1.05, 1.2, 0);
-    group.add(lure);
-    const eyeMat = std(0xffffff, 0xff2a4d, 1.2);
-    for (const side of [1, -1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), eyeMat);
-      eye.position.set(0.85, 0.3, side * 0.55);
-      group.add(eye);
-    }
-    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.5, 1, 4), bodyMat);
-    tail.rotation.z = Math.PI / 2;
-    tail.scale.set(1, 1, 0.3);
-    tail.position.set(-1.5, 0, 0);
-    group.add(tail);
-    group.scale.setScalar(scale);
     if (isBoss) this.bossLight.intensity = 1.4;
     return group;
   }
 
   buildJelly(item) {
     const group = new THREE.Group();
-    const dome = new THREE.Mesh(
-      new THREE.SphereGeometry(1, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2),
-      std(0xc99aff, 0x8a4fd0, 0.9, { transparent: true, opacity: 0.8, roughness: 0.3 }),
-    );
-    dome.scale.set(1, 0.75, 1);
-    group.add(dome);
-    const tentMat = std(0xe0b3ff, 0x8a4fd0, 0.7);
-    for (let i = 0; i < 5; i += 1) {
-      const tent = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.02, 1.3, 5), tentMat);
-      const angle = (i / 5) * Math.PI * 2;
-      tent.position.set(Math.cos(angle) * 0.5, -0.65, Math.sin(angle) * 0.5);
-      group.add(tent);
+    if (this.templates.jelly) {
+      group.add(normalise(this.templates.jelly, MODEL_SIZE.jelly, 'centre'));
+    } else {
+      group.add(this.fallbackJelly());
     }
-    group.scale.setScalar(0.55);
     return group;
   }
 
